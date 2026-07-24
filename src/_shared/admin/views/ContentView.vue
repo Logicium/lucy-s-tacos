@@ -7,19 +7,31 @@ import { tabsForArchetype, type TabId } from '../contentSchemas'
 import AiCopyButton from '../components/AiCopyButton.vue'
 import MapSearchPicker from '../components/MapSearchPicker.vue'
 import TextAreaField from '../../components/forms/TextAreaField.vue'
+import ImageInput from '../components/inputs/ImageInput.vue'
+import ChipsInput from '../components/inputs/ChipsInput.vue'
+import IconInput from '../components/inputs/IconInput.vue'
+import SocialIconInput from '../components/inputs/SocialIconInput.vue'
+import MenuScanButton from '../components/MenuScanButton.vue'
 import { useToast } from '../composables/useToast'
 
 interface PhotoSlot { src: string; alt?: string; caption?: string }
-interface MenuItem { name: string; description?: string; price: string; tags?: string[] }
-interface MenuCategory { name: string; description?: string; items: MenuItem[] }
+interface MenuItem { name: string; description?: string; price: string; tags?: string[]; image?: string }
+interface MenuCategory { name: string; description?: string; items: MenuItem[]; image?: string }
 interface HourRow { day: string; open: string }
-interface SocialLink { label: string; href: string }
+interface SocialLink { label: string; href: string; icon?: string }
 interface FactRow { label: string; value: string }
 interface Testimonial { quote: string; author: string; source?: string }
-// Archetype-specific item types
-interface RoomItem    { name: string; description?: string; rate?: string; capacity?: string; photo?: string }
-interface ServiceItem { name: string; description?: string; price?: string; duration?: string }
-interface ProductItem { name: string; description?: string; price?: string; photo?: string; href?: string }
+// Archetype-specific item types — these MIRROR the shapes the deployed
+// templates read from siteConfig. The editors must write exactly these
+// (a mismatched shape published here once clobbered template arrays and
+// stranded live sites on the splash screen).
+interface RoomItem    { name: string; blurb?: string; rateFrom?: string; image?: string; features?: string[] }
+interface AmenityItem { icon?: string; label: string; description?: string }
+interface ServiceItem { name: string; description?: string; price?: string; icon?: string }
+interface CapabilityItem { label: string; value: string }
+interface ProductItem { name: string; price?: string; blurb?: string; badge?: string; image?: string }
+interface CategoryItem { name: string; image?: string; count?: string }
+interface EventItem   { id?: string; title: string; date: string; startTime?: string; category?: string; priceLabel?: string; image?: string; blurb?: string }
 interface PillarItem  { title: string; body?: string }
 
 interface SiteContent {
@@ -31,11 +43,16 @@ interface SiteContent {
   // mesa
   menu: { intro?: string; categories: MenuCategory[]; fullMenuUrl?: string }
   // hearth
-  rooms: { intro?: string; items: RoomItem[] }
+  rooms: RoomItem[]
+  amenities: AmenityItem[]
   // keystone
-  services: { intro?: string; items: ServiceItem[] }
+  services: ServiceItem[]
+  capabilities: CapabilityItem[]
   // vault
-  products: { intro?: string; items: ProductItem[] }
+  featured: ProductItem[]
+  categories: CategoryItem[]
+  // marquee
+  events: EventItem[]
   // project
   mission: { statement: string; pillars: PillarItem[] }
   testimonials: Testimonial[]
@@ -51,9 +68,13 @@ function blankContent(): SiteContent {
     photos: { hero: { src: '', alt: '' }, about: { src: '', alt: '' }, gallery: [] },
     story: { title: '', paragraphs: [''], facts: [] },
     menu: { intro: '', categories: [], fullMenuUrl: '' },
-    rooms:    { intro: '', items: [] },
-    services: { intro: '', items: [] },
-    products: { intro: '', items: [] },
+    rooms: [],
+    amenities: [],
+    services: [],
+    capabilities: [],
+    featured: [],
+    categories: [],
+    events: [],
     mission:  { statement: '', pillars: [] },
     testimonials: [],
     reviewsSource: 'manual',
@@ -153,8 +174,68 @@ const aiContext = computed(() => ({
   archetype: archetype.value, theme: c.theme, swatch: c.swatch,
 }))
 
+function asRows<T>(v: unknown): T[] { return Array.isArray(v) ? (v as T[]) : [] }
+function replaceRows<T>(target: T[], rows: T[]) { target.length = 0; target.push(...rows) }
+
+/** Legacy admin drafts stored `{intro, items:[...]}` objects with different
+    field names. Migrate them into the template-shaped arrays so old drafts
+    load cleanly and the next publish writes the correct shape. */
+function migrateRooms(raw: unknown): RoomItem[] {
+  if (Array.isArray(raw)) {
+    return raw.map((r: Record<string, unknown>) => ({
+      name: String(r.name ?? ''),
+      blurb: String(r.blurb ?? r.description ?? ''),
+      rateFrom: String(r.rateFrom ?? r.rate ?? ''),
+      image: String(r.image ?? r.photo ?? ''),
+      features: Array.isArray(r.features) ? (r.features as string[]).map(String) : [],
+    }))
+  }
+  if (raw && typeof raw === 'object') {
+    return asRows<Record<string, unknown>>((raw as Record<string, unknown>).items).map(r => ({
+      name: String(r.name ?? ''),
+      blurb: String(r.description ?? ''),
+      rateFrom: String(r.rate ?? ''),
+      image: String(r.photo ?? ''),
+      features: r.capacity ? [String(r.capacity)] : [],
+    }))
+  }
+  return []
+}
+
+function migrateServices(raw: unknown): ServiceItem[] {
+  if (Array.isArray(raw)) {
+    return raw.map((s: Record<string, unknown>) => ({
+      name: String(s.name ?? ''),
+      description: String(s.description ?? ''),
+      price: String(s.price ?? ''),
+      icon: String(s.icon ?? ''),
+    }))
+  }
+  if (raw && typeof raw === 'object') {
+    return asRows<Record<string, unknown>>((raw as Record<string, unknown>).items).map(s => ({
+      name: String(s.name ?? ''),
+      description: String(s.description ?? ''),
+      price: String(s.price ?? ''),
+      icon: '',
+    }))
+  }
+  return []
+}
+
+/** Legacy vault drafts used `products: {intro, items:[{name,description,price,photo}]}`. */
+function migrateLegacyProducts(raw: unknown): ProductItem[] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+  return asRows<Record<string, unknown>>((raw as Record<string, unknown>).items).map(p => ({
+    name: String(p.name ?? ''),
+    price: String(p.price ?? ''),
+    blurb: String(p.description ?? ''),
+    badge: '',
+    image: String(p.photo ?? ''),
+  }))
+}
+
 function applyPayload(raw: Record<string, unknown>) {
-  const p = raw as Partial<SiteContent>
+  const p = raw as Partial<SiteContent> & { products?: unknown }
   if (p.brand    !== undefined) c.brand    = p.brand    as string
   if (p.tagline  !== undefined) c.tagline  = p.tagline  as string
   if (p.blurb    !== undefined) c.blurb    = p.blurb    as string
@@ -163,17 +244,22 @@ function applyPayload(raw: Record<string, unknown>) {
   if (p.swatch   !== undefined) c.swatch   = p.swatch   as string
   if (p.variant  !== undefined) c.variant  = p.variant  as string
   if (p.contact  !== undefined) Object.assign(c.contact, p.contact)
-  if (p.hours    !== undefined) { c.hours.length = 0; c.hours.push(...(p.hours as HourRow[])) }
+  if (p.hours    !== undefined) replaceRows(c.hours, asRows<HourRow>(p.hours))
   if (p.photos   !== undefined) Object.assign(c.photos,  p.photos)
   if (p.story    !== undefined) Object.assign(c.story,   p.story)
   if (p.menu     !== undefined) Object.assign(c.menu,    p.menu)
-  if (p.rooms    !== undefined) Object.assign(c.rooms,    p.rooms)
-  if (p.services !== undefined) Object.assign(c.services, p.services)
-  if (p.products !== undefined) Object.assign(c.products, p.products)
+  if (p.rooms    !== undefined) replaceRows(c.rooms, migrateRooms(p.rooms))
+  if (p.amenities !== undefined) replaceRows(c.amenities, asRows<AmenityItem>(p.amenities))
+  if (p.services !== undefined) replaceRows(c.services, migrateServices(p.services))
+  if (p.capabilities !== undefined) replaceRows(c.capabilities, asRows<CapabilityItem>(p.capabilities))
+  if (p.featured !== undefined) replaceRows(c.featured, asRows<ProductItem>(p.featured))
+  else if (p.products !== undefined) replaceRows(c.featured, migrateLegacyProducts(p.products))
+  if (p.categories !== undefined) replaceRows(c.categories, asRows<CategoryItem>(p.categories))
+  if (p.events   !== undefined) replaceRows(c.events, asRows<EventItem>(p.events))
   if (p.mission  !== undefined) Object.assign(c.mission,  p.mission)
-  if (p.testimonials !== undefined) { c.testimonials.length = 0; c.testimonials.push(...(p.testimonials as Testimonial[])) }
+  if (p.testimonials !== undefined) replaceRows(c.testimonials, asRows<Testimonial>(p.testimonials))
   if (p.reviewsSource !== undefined) c.reviewsSource = (p.reviewsSource === 'google' ? 'google' : 'manual')
-  if (p.social   !== undefined) { c.social.length = 0; c.social.push(...(p.social as SocialLink[])) }
+  if (p.social   !== undefined) replaceRows(c.social, asRows<SocialLink>(p.social))
 }
 
 async function loadDraft() {
@@ -181,13 +267,46 @@ async function loadDraft() {
   try {
     const d = await contentClient.getDraft(siteId.value)
     version.value = d.version; published.value = d.published
+    // Start from a clean slate: applyPayload only overwrites keys present in
+    // the new payload, so without this the previous site's content bleeds
+    // through when switching sites in the header.
+    Object.assign(c, blankContent())
     applyPayload(d.payload)
   } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) }
 }
 
+/** Only publish the archetype-specific keys this site actually uses — writing
+    the other archetypes' (empty) keys would wipe template defaults on the
+    live site the next time it hydrates. */
+const ARCHETYPE_KEYS: Record<string, string[]> = {
+  mesa: ['menu'],
+  hearth: ['rooms', 'amenities'],
+  keystone: ['services', 'capabilities'],
+  vault: ['featured', 'categories'],
+  marquee: ['events'],
+  project: ['mission'],
+}
+const ALL_ARCHETYPE_KEYS = ['menu', 'rooms', 'amenities', 'services', 'capabilities', 'featured', 'categories', 'events', 'mission']
+
+function payloadForSave(): Record<string, unknown> {
+  const payload = JSON.parse(JSON.stringify(c)) as Record<string, unknown>
+  const keep = new Set(ARCHETYPE_KEYS[(archetype.value || '').toLowerCase()] ?? ALL_ARCHETYPE_KEYS)
+  for (const k of ALL_ARCHETYPE_KEYS) {
+    if (!keep.has(k)) delete payload[k]
+  }
+  // Templates key events by id — derive one from the title when absent.
+  if (Array.isArray(payload.events)) {
+    payload.events = (payload.events as EventItem[]).map(e => ({
+      ...e,
+      id: e.id || e.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''),
+    }))
+  }
+  return payload
+}
+
 async function save(publish = false) {
   try {
-    const payload = JSON.parse(JSON.stringify(c)) as Record<string, unknown>
+    const payload = payloadForSave()
     if (publish) {
       const r = await contentClient.publish(siteId.value, payload)
       version.value = r.version; published.value = true
@@ -234,10 +353,6 @@ async function uploadImage(slot: PhotoSlot, key: string, file: File) {
   finally { uploading.value[key] = false }
 }
 
-function onPhotoFile(slot: PhotoSlot, key: string, evt: Event) {
-  const file = (evt.target as HTMLInputElement).files?.[0]
-  if (file) uploadImage(slot, key, file)
-}
 
 /** Upload many gallery photos at once. Each file becomes a new gallery slot. */
 async function onBulkGalleryFiles(evt: Event) {
@@ -247,7 +362,9 @@ async function onBulkGalleryFiles(evt: Event) {
     const slot: PhotoSlot = { src: '', alt: '' }
     c.photos.gallery.push(slot)
     const idx = c.photos.gallery.length - 1
-    await uploadImage(c.photos.gallery[idx], `g${idx}`, file)
+    // Use the slot we just pushed; indexing back through the array yields
+    // `PhotoSlot | undefined` under noUncheckedIndexedAccess.
+    await uploadImage(slot, `g${idx}`, file)
   }
   input.value = ''
 }
@@ -279,42 +396,60 @@ function addParagraph()               { c.story.paragraphs.push('') }
 function removeParagraph(i: number)   { c.story.paragraphs.splice(i, 1) }
 function addFact()                    { c.story.facts = c.story.facts ?? []; c.story.facts.push({ label: '', value: '' }) }
 function removeFact(i: number)        { c.story.facts!.splice(i, 1) }
-function addTestimonial()             { c.testimonials.push({ quote: '', author: '', source: '' }) }
-function removeTestimonial(i: number) { c.testimonials.splice(i, 1) }
-function addSocial()                  { c.social.push({ label: '', href: '' }) }
+function addSocial()                  { c.social.push({ label: '', href: '', icon: '' }) }
 function removeSocial(i: number)      { c.social.splice(i, 1) }
 function addGallerySlot()             { c.photos.gallery.push({ src: '', alt: '' }) }
 function removeGallerySlot(i: number) { c.photos.gallery.splice(i, 1) }
-function addCategory()                { c.menu.categories.push({ name: '', description: '', items: [] }) }
+function addCategory()                { c.menu.categories.push({ name: '', description: '', items: [], image: '' }) }
 function removeCategory(i: number)    { c.menu.categories.splice(i, 1) }
-function addMenuItem(cat: MenuCategory)              { cat.items.push({ name: '', description: '', price: '', tags: [] }) }
+function addMenuItem(cat: MenuCategory)              { cat.items.push({ name: '', description: '', price: '', tags: [], image: '' }) }
 function removeMenuItem(cat: MenuCategory, i: number){ cat.items.splice(i, 1) }
-function tagsStr(item: MenuItem)                     { return (item.tags ?? []).join(', ') }
-function setTags(item: MenuItem, v: string)          { item.tags = v.split(',').map(t => t.trim()).filter(Boolean) }
+
+/** Merge AI-scanned menu categories into the editor. Existing categories are
+    kept; scanned categories with a matching name absorb the new items, and
+    brand-new categories are appended. Images/tags are left for the owner to
+    add — the scan only pulls text. */
+interface ScannedMenu { categories: Array<{ name: string; description?: string; items: Array<{ name: string; description?: string; price?: string }> }> }
+function applyScannedMenu(scanned: ScannedMenu) {
+  let added = 0
+  for (const sc of scanned.categories ?? []) {
+    const name = (sc.name || '').trim()
+    if (!name) continue
+    let cat = c.menu.categories.find(x => x.name.trim().toLowerCase() === name.toLowerCase())
+    if (!cat) {
+      cat = { name, description: sc.description?.trim() || '', items: [], image: '' }
+      c.menu.categories.push(cat)
+    } else if (!cat.description && sc.description) {
+      cat.description = sc.description.trim()
+    }
+    for (const it of sc.items ?? []) {
+      const itemName = (it.name || '').trim()
+      if (!itemName) continue
+      cat.items.push({ name: itemName, description: it.description?.trim() || '', price: (it.price || '').trim(), tags: [], image: '' })
+      added++
+    }
+  }
+  toast.success(added ? `Added ${added} item${added === 1 ? '' : 's'} from your menu photo` : 'No menu items found in that image')
+}
 
 // Archetype-specific helpers
-function addRoom()    { c.rooms.items.push({ name: '', description: '', rate: '', capacity: '', photo: '' }) }
-function removeRoom(i: number) { c.rooms.items.splice(i, 1) }
-function addService() { c.services.items.push({ name: '', description: '', price: '', duration: '' }) }
-function removeService(i: number) { c.services.items.splice(i, 1) }
-function addProduct() { c.products.items.push({ name: '', description: '', price: '', photo: '', href: '' }) }
-function removeProduct(i: number) { c.products.items.splice(i, 1) }
+function addRoom()    { c.rooms.push({ name: '', blurb: '', rateFrom: '', image: '', features: [] }) }
+function removeRoom(i: number) { c.rooms.splice(i, 1) }
+function addAmenity() { c.amenities.push({ icon: '', label: '', description: '' }) }
+function removeAmenity(i: number) { c.amenities.splice(i, 1) }
+function addService() { c.services.push({ name: '', description: '', price: '', icon: '' }) }
+function removeService(i: number) { c.services.splice(i, 1) }
+function addCapability() { c.capabilities.push({ label: '', value: '' }) }
+function removeCapability(i: number) { c.capabilities.splice(i, 1) }
+function addProduct() { c.featured.push({ name: '', price: '', blurb: '', badge: '', image: '' }) }
+function removeProduct(i: number) { c.featured.splice(i, 1) }
+function addShopCategory() { c.categories.push({ name: '', image: '', count: '' }) }
+function removeShopCategory(i: number) { c.categories.splice(i, 1) }
+function addEvent()   { c.events.push({ title: '', date: '', startTime: '', category: '', priceLabel: '', image: '', blurb: '' }) }
+function removeEvent(i: number) { c.events.splice(i, 1) }
 function addPillar()  { c.mission.pillars.push({ title: '', body: '' }) }
 function removePillar(i: number)  { c.mission.pillars.splice(i, 1) }
 
-async function uploadInline(target: { src?: string; photo?: string }, key: string, file: File, prop: 'src' | 'photo' = 'src') {
-  uploading.value[key] = true
-  try {
-    const { base64, contentType, filename } = await prepareImage(file)
-    const r = await contentClient.uploadMedia(siteId.value, filename, contentType, base64)
-    target[prop] = r.url
-  } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) }
-  finally { uploading.value[key] = false }
-}
-function onInlineFile(target: { src?: string; photo?: string }, key: string, evt: Event, prop: 'src' | 'photo' = 'src') {
-  const file = (evt.target as HTMLInputElement).files?.[0]
-  if (file) uploadInline(target, key, file, prop)
-}
 
 /** Upload a PDF (or any non-image) to blob storage and store the URL on `c.menu.fullMenuUrl`. */
 async function onMenuPdfFile(evt: Event) {
@@ -463,30 +598,13 @@ watch(siteId, loadDraft)
           <div class="favicon-row">
             <img v-if="c.favicon" :src="c.favicon" class="favicon-thumb" alt="Current favicon" />
             <div v-else class="favicon-thumb favicon-thumb--empty" aria-hidden="true">ico</div>
-            <label class="file-btn">{{ uploading['favicon'] ? 'Uploading…' : (c.favicon ? 'Replace' : 'Upload') }}
+            <label class="file-btn file-btn--upload">{{ uploading['favicon'] ? 'Uploading…' : (c.favicon ? 'Replace' : 'Upload') }}
               <input type="file" accept="image/png,image/x-icon,image/svg+xml,image/vnd.microsoft.icon" :disabled="!!uploading['favicon']" @change="onFaviconFile" />
             </label>
-            <input v-model="c.favicon" placeholder="or paste URL (.ico / .png / .svg)" class="flex-1" />
+            <span class="favicon-hint">PNG, SVG or ICO · square works best</span>
             <button v-if="c.favicon" type="button" class="btn-remove btn-remove--icon" :title="'Clear favicon'" @click="c.favicon = ''">×</button>
           </div>
         </label>
-        <div class="row-3">
-          <label>Theme
-            <select v-model="c.theme">
-              <option>studio</option><option>ironwood</option><option>heritage</option><option>vibrant</option>
-            </select>
-          </label>
-          <label>Swatch
-            <select v-model="c.swatch">
-              <option>sand</option><option>charcoal</option><option>clay</option><option>sage</option><option>slate</option>
-            </select>
-          </label>
-          <label>Variant
-            <select v-model="c.variant">
-              <option>essentials</option><option>portfolio</option>
-            </select>
-          </label>
-        </div>
       </fieldset>
 
       <!-- ── Contact ── -->
@@ -523,35 +641,21 @@ watch(siteId, loadDraft)
 
         <div class="photo-row">
           <div class="photo-slot">
-            <p class="photo-slot__label">Hero image <span class="hint">16:9 · 2400px wide</span></p>
-            <img v-if="c.photos.hero.src" :src="c.photos.hero.src" class="photo-thumb" />
-            <label class="file-btn">{{ uploading['hero'] ? 'Uploading…' : 'Upload hero' }}
-              <input type="file" accept="image/*" :disabled="!!uploading['hero']" @change="onPhotoFile(c.photos.hero, 'hero', $event)" />
-            </label>
-            <input v-model="c.photos.hero.src" placeholder="or paste URL" />
+            <ImageInput v-model="c.photos.hero.src" :site-id="siteId" label="Hero image" hint="16:9 · 2400px wide" />
             <input v-model="c.photos.hero.alt" placeholder="Alt text" />
             <input v-model="c.photos.hero.caption" placeholder="Caption (optional)" />
           </div>
           <div class="photo-slot">
-            <p class="photo-slot__label">About image <span class="hint">Portrait or 4:5</span></p>
-            <img v-if="c.photos.about.src" :src="c.photos.about.src" class="photo-thumb" />
-            <label class="file-btn">{{ uploading['about'] ? 'Uploading…' : 'Upload about' }}
-              <input type="file" accept="image/*" :disabled="!!uploading['about']" @change="onPhotoFile(c.photos.about, 'about', $event)" />
-            </label>
-            <input v-model="c.photos.about.src" placeholder="or paste URL" />
+            <ImageInput v-model="c.photos.about.src" :site-id="siteId" label="About image" hint="Portrait or 4:5" aspect="4 / 5" />
             <input v-model="c.photos.about.alt" placeholder="Alt text" />
             <input v-model="c.photos.about.caption" placeholder="Caption (optional)" />
           </div>
         </div>
 
-        <p class="section-sub">Gallery <span class="hint">6–8 for essentials · 12–16 for portfolio</span></p>
+        <p class="section-sub">Gallery <span class="hint">6–8 for essentials · 12–16 for portfolio · 20–28 for extended</span></p>
         <div class="gallery-grid">
           <div v-for="(g, i) in c.photos.gallery" :key="i" class="photo-slot photo-slot--sm">
-            <img v-if="g.src" :src="g.src" class="photo-thumb" />
-            <label class="file-btn">{{ uploading[`g${i}`] ? 'Uploading…' : 'Upload' }}
-              <input type="file" accept="image/*" :disabled="!!uploading[`g${i}`]" @change="onPhotoFile(g, `g${i}`, $event)" />
-            </label>
-            <input v-model="g.src" placeholder="or paste URL" />
+            <ImageInput v-model="g.src" :site-id="siteId" aspect="1 / 1" />
             <input v-model="g.alt" placeholder="Alt text" />
             <button type="button" class="btn-remove btn-remove--inline" @click="removeGallerySlot(i)">Remove</button>
           </div>
@@ -592,40 +696,57 @@ watch(siteId, loadDraft)
       <!-- ── Menu (mesa) ── -->
       <fieldset v-if="activeTab === 'menu'">
         <legend>Menu</legend>
-        <div class="row-2">
-          <label>Menu intro line<input v-model="c.menu.intro" placeholder="Updated weekly with…" /></label>
-          <label>Full menu PDF
-            <div class="pdf-upload">
-              <input
-                type="file"
-                accept="application/pdf"
-                :disabled="uploading['menuPdf']"
-                @change="onMenuPdfFile"
-              />
-              <a v-if="c.menu.fullMenuUrl" :href="c.menu.fullMenuUrl" target="_blank" rel="noopener" class="pdf-upload__link">View current PDF</a>
-              <button
-                v-if="c.menu.fullMenuUrl"
-                type="button"
-                class="pdf-upload__clear"
-                @click="c.menu.fullMenuUrl = ''"
-              >Remove</button>
-              <span v-if="uploading['menuPdf']" class="meta">Uploading…</span>
+        <label>Menu intro line<input v-model="c.menu.intro" placeholder="Updated weekly with…" /></label>
+
+        <div class="menu-uploads">
+          <div class="menu-upload">
+            <span class="menu-upload__title">Full menu PDF</span>
+            <div class="file-actions">
+              <label class="file-btn file-btn--upload">
+                {{ uploading['menuPdf'] ? 'Uploading…' : (c.menu.fullMenuUrl ? 'Replace PDF' : 'Choose PDF') }}
+                <input type="file" accept="application/pdf" :disabled="uploading['menuPdf']" @change="onMenuPdfFile" />
+              </label>
+              <a v-if="c.menu.fullMenuUrl" :href="c.menu.fullMenuUrl" target="_blank" rel="noopener" class="pdf-upload__link">View current</a>
+              <button v-if="c.menu.fullMenuUrl" type="button" class="pdf-upload__clear" @click="c.menu.fullMenuUrl = ''">Remove</button>
             </div>
-          </label>
+          </div>
+
+          <div class="menu-upload menu-upload--scan">
+            <span class="menu-upload__title">Scan a menu photo</span>
+            <MenuScanButton v-if="siteId" :site-id="siteId" @scanned="applyScannedMenu" />
+            <span class="menu-upload__hint">Snap or upload a photo of your printed menu — we read the text and fill in the items below for you.</span>
+          </div>
         </div>
 
         <div v-for="(cat, ci) in c.menu.categories" :key="ci" class="menu-cat">
-          <div class="menu-cat__header">
-            <input v-model="cat.name" placeholder="Category (e.g. Small)" class="flex-2" />
-            <input v-model="cat.description" placeholder="Short description (optional)" class="flex-3" />
-            <button type="button" class="btn-remove" @click="removeCategory(ci)">Remove category</button>
+          <div class="menu-cat__top">
+            <div class="menu-cat__img">
+              <ImageInput :model-value="cat.image ?? ''" :site-id="siteId" aspect="1 / 1" @update:model-value="(v: string) => cat.image = v" />
+            </div>
+            <div class="menu-cat__fields">
+              <div class="menu-cat__row">
+                <input v-model="cat.name" placeholder="Category (e.g. Small plates)" class="flex-1" />
+                <button type="button" class="btn-remove" @click="removeCategory(ci)">Remove category</button>
+              </div>
+              <input v-model="cat.description" placeholder="Short description (optional)" />
+            </div>
           </div>
+
           <div v-for="(item, ii) in cat.items" :key="ii" class="menu-item">
-            <input v-model="item.name" placeholder="Dish name" class="flex-2" />
-            <input v-model="item.description" placeholder="Description" class="flex-3" />
-            <input v-model="item.price" placeholder="$0" style="max-width:80px" />
-            <input :value="tagsStr(item)" @input="setTags(item, ($event.target as HTMLInputElement).value)" placeholder="V, GF…" style="max-width:100px" />
-            <button type="button" class="btn-remove btn-remove--icon" @click="removeMenuItem(cat, ii)">×</button>
+            <div class="menu-item__img">
+              <ImageInput :model-value="item.image ?? ''" :site-id="siteId" aspect="1 / 1" @update:model-value="(v: string) => item.image = v" />
+            </div>
+            <div class="menu-item__body">
+              <div class="menu-item__row">
+                <input v-model="item.name" placeholder="Dish name" class="menu-item__name" />
+                <input v-model="item.price" placeholder="$0" class="menu-item__price" />
+                <div class="menu-item__tags">
+                  <ChipsInput :model-value="item.tags ?? []" placeholder="V, GF…" @update:model-value="(v: string[]) => item.tags = v" />
+                </div>
+                <button type="button" class="btn-remove btn-remove--icon" @click="removeMenuItem(cat, ii)">×</button>
+              </div>
+              <TextAreaField v-model="item.description" :rows="2" :maxlength="160" placeholder="Description…" />
+            </div>
           </div>
           <button type="button" class="btn-add btn-add--indent" @click="addMenuItem(cat)">+ Add item</button>
         </div>
@@ -635,36 +756,52 @@ watch(siteId, loadDraft)
       <!-- ── Rooms (hearth) ── -->
       <fieldset v-if="activeTab === 'rooms'">
         <legend>Rooms</legend>
-        <label>Intro line<input v-model="c.rooms.intro" placeholder="Stay in one of our…" /></label>
-        <div v-for="(r, i) in c.rooms.items" :key="i" class="testimonial-row">
+        <div v-for="(r, i) in c.rooms" :key="i" class="testimonial-row">
           <div class="row-2">
             <input v-model="r.name" placeholder="Room name (e.g. Mountain Suite)" />
-            <input v-model="r.rate" placeholder="Rate (e.g. $180 / night)" />
+            <input v-model="r.rateFrom" placeholder="Rate from (e.g. $180)" />
           </div>
-          <input v-model="r.capacity" placeholder="Capacity (e.g. Sleeps 2)" />
-          <TextAreaField v-model="r.description" :rows="2" :maxlength="300" placeholder="Short description…" />
-          <div class="list-row">
-            <img v-if="r.photo" :src="r.photo" class="photo-thumb" style="max-width:160px" />
-            <label class="file-btn">{{ uploading[`room${i}`] ? 'Uploading…' : 'Upload photo' }}
-              <input type="file" accept="image/*" :disabled="!!uploading[`room${i}`]" @change="onInlineFile(r, `room${i}`, $event, 'photo')" />
-            </label>
-            <input v-model="r.photo" placeholder="or paste URL" class="flex-1" />
+          <ChipsInput
+            :model-value="r.features ?? []"
+            placeholder="Add a feature (King bed, Sleeps 2…)"
+            @update:model-value="(v: string[]) => r.features = v"
+          />
+          <div class="field-with-ai">
+            <TextAreaField v-model="r.blurb" :rows="2" :maxlength="300" placeholder="Short description…" />
+            <AiCopyButton :site-id="siteId" :field="`room: ${r.name || 'room'}`" prompt="A short, warm room description (~25 words)" :context="aiContext" @pick="(v) => r.blurb = v" />
           </div>
+          <ImageInput
+            :model-value="r.image ?? ''"
+            :site-id="siteId"
+            @update:model-value="(v: string) => r.image = v"
+          />
           <button type="button" class="btn-remove" @click="removeRoom(i)">Remove room</button>
         </div>
         <button type="button" class="btn-add" @click="addRoom">+ Add room</button>
+
+        <p class="section-sub">Amenities <span class="hint">included with every stay</span></p>
+        <div v-for="(a, i) in c.amenities" :key="i" class="list-row">
+          <div style="width: 140px; flex-shrink: 0">
+            <IconInput :model-value="a.icon ?? ''" @update:model-value="(v: string) => a.icon = v" />
+          </div>
+          <input v-model="a.label" placeholder="Label (e.g. High-speed Wi-Fi)" />
+          <input v-model="a.description" placeholder="Short description (optional)" class="flex-1" />
+          <button type="button" class="btn-remove" @click="removeAmenity(i)">✕</button>
+        </div>
+        <button type="button" class="btn-add" @click="addAmenity">+ Add amenity</button>
       </fieldset>
 
       <!-- ── Services (keystone) ── -->
       <fieldset v-if="activeTab === 'services'">
         <legend>Services</legend>
-        <label>Intro line<input v-model="c.services.intro" placeholder="What we offer…" /></label>
-        <div v-for="(s, i) in c.services.items" :key="i" class="testimonial-row">
+        <div v-for="(s, i) in c.services" :key="i" class="testimonial-row">
           <div class="row-2">
             <input v-model="s.name" placeholder="Service name" />
             <input v-model="s.price" placeholder="Price (e.g. From $120)" />
           </div>
-          <input v-model="s.duration" placeholder="Duration (e.g. 60 min)" />
+          <div style="max-width: 160px">
+            <IconInput :model-value="s.icon ?? ''" @update:model-value="(v: string) => s.icon = v" />
+          </div>
           <div class="field-with-ai">
             <TextAreaField v-model="s.description" :rows="2" :maxlength="300" placeholder="Description…" />
             <AiCopyButton :site-id="siteId" :field="`service: ${s.name || 'service'}`" prompt="A short, concrete service description (~30 words)" :context="aiContext" @pick="(v) => s.description = v" />
@@ -672,29 +809,81 @@ watch(siteId, loadDraft)
           <button type="button" class="btn-remove" @click="removeService(i)">Remove service</button>
         </div>
         <button type="button" class="btn-add" @click="addService">+ Add service</button>
+
+        <p class="section-sub">Capabilities <span class="hint">trust-bar stats (e.g. Years in business: 15+)</span></p>
+        <div v-for="(cap, i) in c.capabilities" :key="i" class="list-row">
+          <input v-model="cap.label" placeholder="Label (e.g. Years in business)" />
+          <input v-model="cap.value" placeholder="Value (e.g. 15+)" class="flex-1" />
+          <button type="button" class="btn-remove" @click="removeCapability(i)">✕</button>
+        </div>
+        <button type="button" class="btn-add" @click="addCapability">+ Add capability</button>
       </fieldset>
 
       <!-- ── Products (vault) ── -->
       <fieldset v-if="activeTab === 'products'">
-        <legend>Products</legend>
-        <label>Intro line<input v-model="c.products.intro" placeholder="Featured pieces…" /></label>
-        <div v-for="(p, i) in c.products.items" :key="i" class="testimonial-row">
+        <legend>Featured products</legend>
+        <div v-for="(p, i) in c.featured" :key="i" class="testimonial-row">
           <div class="row-2">
             <input v-model="p.name" placeholder="Product name" />
-            <input v-model="p.price" placeholder="Price" />
+            <input v-model="p.price" placeholder="Price (e.g. $28)" />
           </div>
-          <input v-model="p.href" placeholder="Link / Shopify URL (optional)" />
-          <TextAreaField v-model="p.description" :rows="2" :maxlength="300" placeholder="Description…" />
-          <div class="list-row">
-            <img v-if="p.photo" :src="p.photo" class="photo-thumb" style="max-width:160px" />
-            <label class="file-btn">{{ uploading[`prod${i}`] ? 'Uploading…' : 'Upload photo' }}
-              <input type="file" accept="image/*" :disabled="!!uploading[`prod${i}`]" @change="onInlineFile(p, `prod${i}`, $event, 'photo')" />
-            </label>
-            <input v-model="p.photo" placeholder="or paste URL" class="flex-1" />
+          <input v-model="p.badge" placeholder="Badge (optional — New · Local · Sale)" />
+          <div class="field-with-ai">
+            <TextAreaField v-model="p.blurb" :rows="2" :maxlength="300" placeholder="Short description…" />
+            <AiCopyButton :site-id="siteId" :field="`product: ${p.name || 'product'}`" prompt="A short, tactile product description (~20 words)" :context="aiContext" @pick="(v) => p.blurb = v" />
           </div>
+          <ImageInput
+            :model-value="p.image ?? ''"
+            :site-id="siteId"
+            aspect="1 / 1"
+            @update:model-value="(v: string) => p.image = v"
+          />
           <button type="button" class="btn-remove" @click="removeProduct(i)">Remove product</button>
         </div>
         <button type="button" class="btn-add" @click="addProduct">+ Add product</button>
+
+        <p class="section-sub">Shop categories</p>
+        <div v-for="(cat, i) in c.categories" :key="i" class="testimonial-row">
+          <div class="row-2">
+            <input v-model="cat.name" placeholder="Category name (e.g. Apparel)" />
+            <input v-model="cat.count" placeholder="Item count (e.g. 24 items)" />
+          </div>
+          <ImageInput
+            :model-value="cat.image ?? ''"
+            :site-id="siteId"
+            aspect="1 / 1"
+            @update:model-value="(v: string) => cat.image = v"
+          />
+          <button type="button" class="btn-remove" @click="removeShopCategory(i)">Remove category</button>
+        </div>
+        <button type="button" class="btn-add" @click="addShopCategory">+ Add category</button>
+      </fieldset>
+
+      <!-- ── Events (marquee) ── -->
+      <fieldset v-if="activeTab === 'events'">
+        <legend>Events</legend>
+        <div v-for="(e, i) in c.events" :key="i" class="testimonial-row">
+          <div class="row-2">
+            <input v-model="e.title" placeholder="Event title" />
+            <input v-model="e.date" type="date" />
+          </div>
+          <div class="row-2">
+            <input v-model="e.startTime" placeholder="Start time (e.g. 7:30 PM)" />
+            <input v-model="e.priceLabel" placeholder="Price label (e.g. $25 · Free)" />
+          </div>
+          <input v-model="e.category" placeholder="Category (Music · Comedy · Gallery)" />
+          <div class="field-with-ai">
+            <TextAreaField v-model="e.blurb" :rows="2" :maxlength="300" placeholder="One line that sells the night…" />
+            <AiCopyButton :site-id="siteId" :field="`event: ${e.title || 'event'}`" prompt="A punchy one-line event description (~20 words)" :context="aiContext" @pick="(v) => e.blurb = v" />
+          </div>
+          <ImageInput
+            :model-value="e.image ?? ''"
+            :site-id="siteId"
+            @update:model-value="(v: string) => e.image = v"
+          />
+          <button type="button" class="btn-remove" @click="removeEvent(i)">Remove event</button>
+        </div>
+        <button type="button" class="btn-add" @click="addEvent">+ Add event</button>
       </fieldset>
 
       <!-- ── Mission (project) ── -->
@@ -718,42 +907,13 @@ watch(siteId, loadDraft)
         <button type="button" class="btn-add" @click="addPillar">+ Add pillar</button>
       </fieldset>
 
-      <!-- ── Testimonials ── -->
-      <fieldset v-if="activeTab === 'testimonials'">
-        <legend>Testimonials</legend>
-        <div class="reviews-source">
-          <label class="reviews-source__label">Show on the public site</label>
-          <div class="reviews-source__choices">
-            <label class="reviews-source__choice">
-              <input type="radio" v-model="c.reviewsSource" value="manual" />
-              <span>Hand-written testimonials</span>
-            </label>
-            <label class="reviews-source__choice">
-              <input type="radio" v-model="c.reviewsSource" value="google" />
-              <span>Live Google reviews</span>
-            </label>
-          </div>
-          <p class="reviews-source__hint">
-            Live reviews pull from the business connected on the
-            <em>Google Reviews</em> page. If none are available, the public
-            site falls back to the hand-written list below.
-          </p>
-        </div>
-        <div v-for="(t, i) in c.testimonials" :key="i" class="testimonial-row">
-          <TextAreaField v-model="t.quote" :rows="2" :maxlength="400" placeholder="Quote…" />
-          <div class="row-2">
-            <input v-model="t.author" placeholder="Author name" />
-            <input v-model="t.source" placeholder="Source (Google, Yelp…)" />
-          </div>
-          <button type="button" class="btn-remove" @click="removeTestimonial(i)">Remove</button>
-        </div>
-        <button type="button" class="btn-add" @click="addTestimonial">+ Add testimonial</button>
-      </fieldset>
-
       <!-- ── Social ── -->
       <fieldset v-if="activeTab === 'social'">
         <legend>Social links</legend>
-        <div v-for="(s, i) in c.social" :key="i" class="list-row">
+        <div v-for="(s, i) in c.social" :key="i" class="social-row">
+          <div class="social-row__icon">
+            <SocialIconInput :model-value="s.icon ?? ''" @update:model-value="(v: string) => s.icon = v" />
+          </div>
           <input v-model="s.label" placeholder="Label (Instagram, Facebook…)" class="flex-1" />
           <input v-model="s.href"  placeholder="https://…" class="flex-3" />
           <button type="button" class="btn-remove btn-remove--icon" @click="removeSocial(i)">×</button>
@@ -779,6 +939,8 @@ watch(siteId, loadDraft)
 .cv-header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1.5rem; }
 .cv-header h1 { margin: 0; font-family: var(--adm-font-serif); font-weight: 500; }
 .cv-header__right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+/* Save draft / Publish are pill-shaped (matching the save-bar pill). */
+.cv-header__right > button { border-radius: 999px; padding-inline: 1.25rem; }
 
 /* Version chip is a button that opens the history dropdown. */
 .history-wrap { position: relative; display: inline-block; }
@@ -947,11 +1109,21 @@ textarea { resize: vertical; }
 .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
 .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; }
 
-/* List rows */
-.list-row { display: flex; align-items: flex-start; gap: 0.5rem; margin-bottom: 0.5rem; }
+/* List rows — align children to bottom so a row's delete button shares
+   its baseline with the inputs in the same row. */
+.list-row { display: flex; align-items: end; gap: 0.5rem; margin-bottom: 0.5rem; }
 .flex-1 { flex: 1; }
 .flex-2 { flex: 2; }
 .flex-3 { flex: 3; }
+
+/* Social link row — icon chooser + label + URL, all on one baseline. */
+.social-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem; }
+.social-row__icon { flex: 0 0 auto; width: 150px; }
+.social-row input { margin-top: 0; min-height: 2.5rem; }
+@media (max-width: 640px) {
+  .social-row { flex-wrap: wrap; }
+  .social-row__icon { width: 100%; }
+}
 
 /* Buttons */
 button {
@@ -1011,18 +1183,27 @@ button:hover { border-color: var(--adm-accent); color: var(--adm-accent); }
 .field-with-ai { display: flex; align-items: flex-start; gap: 0.5rem; }
 .field-with-ai > .ta-field { flex: 1; min-width: 0; }
 
-/* Favicon picker row. */
-.favicon-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.3rem; }
+/* Favicon picker row. Thumb + upload button share the input's outer height
+   so the control lines up with the text fields above it. */
+.favicon-row { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.3rem; }
 .favicon-thumb {
-  width: 2.4rem;
-  height: 2.4rem;
-  border-radius: 6px;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: var(--adm-radius-sm);
   background: var(--adm-surface-2);
   border: 1px solid var(--adm-border);
   object-fit: contain;
-  padding: 2px;
+  padding: 3px;
   box-sizing: border-box;
+  flex-shrink: 0;
 }
+.favicon-row .file-btn--upload {
+  height: 2.6rem;
+  display: inline-flex; align-items: center;
+  padding-inline: 1.1rem;
+  flex-shrink: 0;
+}
+.favicon-hint { font-size: 0.78rem; color: var(--adm-text-subtle); font-weight: 400; letter-spacing: normal; text-transform: none; }
 .favicon-thumb--empty {
   display: inline-flex;
   align-items: center;
@@ -1080,30 +1261,63 @@ button:hover { border-color: var(--adm-accent); color: var(--adm-accent); }
 .file-btn:hover { border-color: var(--adm-accent); color: var(--adm-accent); }
 .file-btn input[type="file"] { display: none; }
 
-/* Menu */
-.pdf-upload {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem;
-  margin-top: 0.3rem;
+/* Menu — uploads row (PDF + AI photo scan) */
+.menu-uploads {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem; margin: 0.25rem 0 0.5rem;
 }
-.pdf-upload input[type="file"] { width: auto; margin: 0; }
-.pdf-upload__link {
-  font-size: 0.8rem; color: var(--adm-accent); text-decoration: underline;
+.menu-upload {
+  display: flex; flex-direction: column; gap: 0.5rem;
+  padding: 0.9rem 1rem;
+  background: var(--adm-surface-3);
+  border: 1px solid var(--adm-border-soft);
+  border-radius: var(--adm-radius-lg);
 }
+.menu-upload--scan { border-style: dashed; }
+.menu-upload__title {
+  font-size: 0.74rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--adm-text-muted);
+}
+.menu-upload__hint { font-size: 0.78rem; color: var(--adm-text-subtle); font-weight: 400; letter-spacing: normal; text-transform: none; line-height: 1.4; }
+.file-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+.pdf-upload__link { font-size: 0.8rem; color: var(--adm-accent); text-decoration: underline; }
 .pdf-upload__clear {
   background: transparent; border: 1px solid var(--adm-border);
-  color: var(--adm-text-muted); font-size: 0.75rem; padding: 0.2rem 0.55rem;
+  color: var(--adm-text-muted); font-size: 0.75rem; padding: 0.25rem 0.6rem;
   border-radius: 999px; cursor: pointer;
 }
 .pdf-upload__clear:hover { border-color: var(--adm-danger); color: var(--adm-danger); }
+
+/* Menu categories + items — image on the left, aligned field rows on the right */
 .menu-cat {
   background: var(--adm-surface-3);
   border: 1px solid var(--adm-border-soft);
-  border-radius: var(--adm-radius, 10px);
-  padding: 0.85rem; margin-bottom: 0.85rem;
+  border-radius: var(--adm-radius-lg);
+  padding: 1rem; margin-bottom: 0.85rem;
 }
-.menu-cat__header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
-.menu-item { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
-.menu-item input { margin-top: 0; }
+.menu-cat__top { display: grid; grid-template-columns: 88px 1fr; gap: 0.75rem; margin-bottom: 0.85rem; }
+.menu-cat__img { width: 88px; }
+.menu-cat__fields { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
+.menu-cat__row { display: flex; align-items: center; gap: 0.5rem; }
+.menu-cat__fields input { margin-top: 0; }
+
+.menu-item {
+  display: grid; grid-template-columns: 72px 1fr; gap: 0.6rem;
+  padding: 0.7rem; margin-bottom: 0.5rem;
+  background: var(--adm-surface-2);
+  border: 1px solid var(--adm-border-soft);
+  border-radius: var(--adm-radius);
+}
+.menu-item__img { width: 72px; }
+.menu-item__body { display: flex; flex-direction: column; gap: 0.45rem; min-width: 0; }
+/* Every control on this row shares the same height + centered baseline so the
+   fields line up instead of drifting off the row. */
+.menu-item__row { display: flex; align-items: center; gap: 0.5rem; }
+.menu-item__row input { margin-top: 0; min-height: 2.5rem; }
+.menu-item__name { flex: 1 1 auto; min-width: 0; }
+.menu-item__price { flex: 0 0 5rem; width: 5rem; text-align: center; }
+.menu-item__tags { flex: 1 1 40%; min-width: 130px; }
+.menu-item__tags :deep(.ai-control) { margin-top: 0; }
 
 /* Testimonials */
 .reviews-source {
