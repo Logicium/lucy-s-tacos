@@ -50,6 +50,68 @@ async function load() {
   }
 }
 
+/* ── Products link ──
+   The shop catalog IS the site's Products content: the cards on the shop page
+   feed this list automatically, so owners don't retype what they already
+   wrote. Idempotent — matches on name, so re-running only adds what's new.
+   Prices/inventory are refined here. */
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+const syncing = ref(false)
+const syncStatus = ref<string | null>(null)
+
+async function syncFromContent() {
+  if (!siteId.value || syncing.value) return
+  syncing.value = true
+  syncStatus.value = null
+  try {
+    const d = await contentClient.getDraft(siteId.value)
+    // Current content stores these under `featured`; older vault drafts used
+    // `products: { items: [...] }`.
+    const payload = d.payload as {
+      featured?: Array<{ name?: string; price?: string; blurb?: string; image?: string }>
+      products?: { items?: Array<{ name?: string; price?: string; description?: string; photo?: string }> }
+    }
+    const list: Array<{ name?: string; price?: string; blurb?: string; image?: string }> =
+      payload.featured?.length
+        ? payload.featured
+        : (payload.products?.items ?? []).map(p => ({
+            name: p.name, price: p.price, blurb: p.description, image: p.photo,
+          }))
+
+    const existing = new Set(products.value.map(p => p.name.toLowerCase()))
+    let added = 0
+    for (const item of list) {
+      const name = (item.name ?? '').trim()
+      if (!name || existing.has(name.toLowerCase())) continue
+      const priceCents = Math.round((parseFloat(String(item.price ?? '').replace(/[^0-9.]/g, '')) || 0) * 100)
+      const created = await contentClient.shopCreateProduct(siteId.value, {
+        sku: (slugify(name) || `product-${added + 1}`).slice(0, 40),
+        name,
+        description: item.blurb?.trim() || undefined,
+        priceCents,
+        currency: resolved.value?.currency || 'USD',
+        imageUrl: item.image?.trim() || undefined,
+        inventory: -1,
+        active: true,
+        sortOrder: products.value.length + added,
+      })
+      products.value.push(created)
+      existing.add(name.toLowerCase())
+      added++
+    }
+    syncStatus.value = added
+      ? `Imported ${added} product${added === 1 ? '' : 's'} from your Products page.`
+      : 'Everything on your Products page is already sellable here.'
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    syncing.value = false
+  }
+}
+
 async function addProduct() {
   if (!siteId.value) return
   const p = newProduct.value
@@ -161,8 +223,15 @@ function money(cents?: number, currency?: string) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency || resolved.value?.currency || 'USD' }).format(cents / 100)
 }
 
-onMounted(load)
-watch(siteId, load)
+/* Products -> Shop is a live link: after load, silently pull in anything on
+   the Products page that isn't sellable yet. The button in the catalog header
+   stays as a manual re-sync. */
+async function loadAndSync() {
+  await load()
+  await syncFromContent()
+}
+onMounted(loadAndSync)
+watch(siteId, loadAndSync)
 </script>
 
 <template>
@@ -191,7 +260,7 @@ watch(siteId, load)
 
     <template v-else>
       <p v-if="error" class="adm-msg-err">{{ error }}</p>
-      <p v-if="loading" class="adm-muted">Loadingâ€¦</p>
+      <p v-if="loading" class="adm-muted">Loading…</p>
 
       <div v-if="!addOnEnabled" class="adm-card adm-card--soft addon-gate">
         <p>
@@ -201,8 +270,16 @@ watch(siteId, load)
       </div>
 
       <section class="adm-card">
-        <h2 class="adm-h2">Products</h2>
-        <p class="adm-muted adm-mb">Each product appears as a card on your shop page.</p>
+        <div class="shop-cat-head">
+          <div>
+            <h2 class="adm-h2">Products</h2>
+            <p class="adm-muted">Each product appears as a card on your shop page.</p>
+          </div>
+          <button type="button" class="adm-btn adm-btn--sm" :disabled="syncing" @click="syncFromContent">
+            {{ syncing ? 'Importing…' : 'Import from your Products page' }}
+          </button>
+        </div>
+        <p v-if="syncStatus" class="adm-muted adm-mb">{{ syncStatus }}</p>
 
         <ul v-if="products.length" class="rm-list">
           <li v-for="p in products" :key="p.id" class="rm-row">
@@ -214,7 +291,7 @@ watch(siteId, load)
             <div class="rm-row__img"><ImageInput :model-value="p.imageUrl ?? ''" :site-id="siteId" aspect="1 / 1" @update:model-value="(v: string) => p.imageUrl = v" /></div>
             <div class="rm-row__active"><ToggleInput v-model="p.active" label="Live" /></div>
             <button type="button" class="adm-btn adm-btn--primary adm-btn--sm" @click="saveProduct(p)">Save</button>
-            <button type="button" class="adm-btn adm-btn--ghost adm-btn--sm" @click="deleteProduct(p)">Ã—</button>
+            <button type="button" class="adm-btn adm-btn--ghost adm-btn--sm" @click="deleteProduct(p)">×</button>
           </li>
         </ul>
         <p v-else class="adm-muted adm-mb">No products yet.</p>
@@ -252,7 +329,7 @@ watch(siteId, load)
             <textarea class="adm-input" rows="2" v-model="resolved.pickupInstructions" />
           </label>
           <label class="adm-field adm-field--full">
-            <span>Notification email (optional â€” defaults to your account email)</span>
+            <span>Notification email (optional — defaults to your account email)</span>
             <input class="adm-input" type="email" v-model="resolved.notifyEmail" />
           </label>
         </div>
@@ -260,7 +337,7 @@ watch(siteId, load)
 
       <div class="save-bar">
         <button type="button" class="adm-btn adm-btn--primary" :disabled="saving" @click="saveConfig">
-          {{ saving ? 'Savingâ€¦' : 'Save settings' }}
+          {{ saving ? 'Saving…' : 'Save settings' }}
         </button>
         <span v-if="savedAt" class="adm-muted">Saved {{ new Date(savedAt).toLocaleTimeString() }}</span>
       </div>
@@ -277,10 +354,10 @@ watch(siteId, load)
               <td>{{ new Date(o.createdAt).toLocaleString() }}</td>
               <td>
                 {{ o.name }}<br />
-                <small><a :href="`mailto:${o.email}`">{{ o.email }}</a><template v-if="o.phone"> Â· {{ o.phone }}</template></small>
+                <small><a :href="`mailto:${o.email}`">{{ o.email }}</a><template v-if="o.phone"> · {{ o.phone }}</template></small>
               </td>
               <td>
-                <div v-for="it in o.items" :key="it.productId">{{ it.name }} Ã— {{ it.quantity }}</div>
+                <div v-for="it in o.items" :key="it.productId">{{ it.name }} × {{ it.quantity }}</div>
               </td>
               <td>{{ o.fulfillment }}</td>
               <td>{{ money(o.totalCents, o.currency) }}</td>
@@ -305,6 +382,11 @@ watch(siteId, load)
 .adm-h2 { margin: 0 0 0.4rem; font-size: 1.05rem; }
 .adm-mb { margin-bottom: 0.75rem; }
 .addon-gate { padding: 1rem 1.1rem; margin-bottom: 1rem; }
+.shop-cat-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem;
+}
+.shop-cat-head .adm-muted { margin: 0; }
 
 .rm-list { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; flex-direction: column; gap: 0.35rem; }
 .rm-row { display: grid; grid-template-columns: 7rem 10rem 1fr 6rem 5rem 1.3fr 3rem auto auto; gap: 0.3rem; align-items: center; }
